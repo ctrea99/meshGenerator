@@ -60,6 +60,7 @@ class deLavalNozzleGenerator:
         self.MESH2D     = 0
         self.WEDGE      = 0
         self.CHANNEL    = 0
+        self.RESERVOIR  = 0
         
         
     def generateCrossSection(self,nozzleLength, cavityLength, cavityHeight, numWallPoints=1, lc=1):
@@ -195,10 +196,14 @@ class deLavalNozzleGenerator:
             Nozzle radius at each corresponding point along the nozzle axis
 
         """
+               
         
-        #multiplier = 1e-3
-        
-        #radius = 1 - (0.868 * (-z + 2)**2) + (0.432 * (-z + 2)**3)  
+        # temp = z / 1e-3      
+        # #radius = 1 - (0.868 * (-z + 2)**2) + (0.432 * (-z + 2)**3) 
+        # radius = 1 - (0.868 * (-temp + 2)**2) + (0.432 * (-temp + 2)**3) 
+        # radius *= 1e-3
+                
+
         radius = np.zeros(len(z))
         
         for i in range(0, len(z)):
@@ -206,7 +211,7 @@ class deLavalNozzleGenerator:
                 radius[i] = 0.4e-3
             else:
                 radius[i] = (2.1/10.5) * z[i]
-          
+
         
         return(radius)    
     
@@ -387,6 +392,152 @@ class deLavalNozzleGenerator:
         
         ### Mesh not generated here so that rotations, etc. can be performed in other 
         ### processes without destroying the mesh structure
+            
+        
+        
+    def generateReservoir(self, reservoirLength, reservoirHeight, reservoirMeshDensityZ, uReservoirMeshDensityX, grading='False'):
+        """
+        (Optional) Function for generating a rectangular reservoir at the nozzle inlet
+
+        Parameters
+        ----------
+        reservoirLength : TYPE float
+            Length of the reservoir along the nozzle (z) axis
+        reservoirHeight : TYPE float
+            Height of the reservoir along the transverse (x) direction
+        reservoirMeshDensityZ : TYPE int
+            Number of mesh cells to be generated within the reservoir along the 
+            nozzle (z) axis.
+        uReservoirMeshDensityX : TYPE int
+            Number of mesh cells to be generated within the reservoir along the 
+            upper section of the x-axis
+        grading : TYPE str, optional
+            Selects the type of mesh grading within the reservoir.
+            The available options are:
+                - 'False': Generates a uniform mesh cell size throughout the reservoir
+                    according to the number of cells specified under reservoirMeshDensityZ
+                    and uReservoirMeshDensityX.
+                - 'True': Grades the mesh within the reservoir such that
+                    there is a smooth cell size transition between the nozzle and
+                    the reservoir.
+                    NOTE: Grading may not be performed if the number of mesh cells
+                    within the reservoir is too high.
+                - 'Uniform': Calculates the number of mesh cells to generate within
+                    the reservoir such that the cell size is consistent with
+                    the mesh inside of the nozzle. Mesh cell size is uniform.
+                    NOTE: with this option, the values of reservoirMeshDensityZ and
+                    uReservoirMeshDensityX are ignored.
+            The default is 'False'.
+
+        Returns
+        -------
+        None.
+
+        """
+        
+        # set class variables
+        self.reservoirLength        = reservoirLength
+        self.reservoirHeight        = reservoirHeight
+        self.reservoirMeshDensityZ  = reservoirMeshDensityZ
+        self.reservoirMeshDensityX  = uReservoirMeshDensityX
+        self.reservoirGradingOpt    = grading
+        
+        # marker that this function has run
+        self.RESERVOIR = 1
+        
+       
+        # ------------------------------------------------ #
+        #                Generate Geometry                 #
+        # ------------------------------------------------ #
+          
+        # generate points for reservoir
+        rp1 = gmsh.model.geo.addPoint(reservoirHeight, 0, 0)
+        rp2 = gmsh.model.geo.addPoint(reservoirHeight, 0, -reservoirLength)
+        rp3 = gmsh.model.geo.addPoint(self.inletRadius, 0, -reservoirLength)
+        rp4 = gmsh.model.geo.addPoint(0, 0, -reservoirLength)
+        
+        rl1 = gmsh.model.geo.addLine(self.pList[0], rp1)
+        rl2 = gmsh.model.geo.addLine(rp1, rp2)
+        rl3 = gmsh.model.geo.addLine(rp2, rp3)
+        rl4 = gmsh.model.geo.addLine(rp3, rp4)
+        rl5 = gmsh.model.geo.addLine(rp4, self.p1)
+        
+        # set reservoir surface
+        temp = [-self.l4, rl1, rl2, rl3, rl4, rl5]
+        rcl1 = gmsh.model.geo.addCurveLoop(temp)
+        self.rs1 = gmsh.model.geo.addPlaneSurface([rcl1])
+        
+        # Set additional class variables
+        self.rp1 = rp1
+        self.rp2 = rp2
+        self.rp3 = rp3
+        
+        self.rl1 = rl1
+        self.rl2 = rl2
+        self.rl3 = rl3
+        self.rl4 = rl4
+           
+        gmsh.model.geo.synchronize()
+        
+          
+        
+        # ------------------------------------------------ #
+        #            Generate Structured Mesh              #
+        # -------------------------------------------------#
+           
+        # Select desired mesh grading method
+        if grading == 'True':
+            # calculate progression required for smooth cell size transition
+            print("Grading reservoir z-axis...")
+            adjacentSize = self.nozzleLength / (self.numWallPoints+1)
+            reservoirGradingZ = self.findRoots(reservoirMeshDensityZ, reservoirLength, adjacentSize)
+            
+            print("Grading upper reservoir x-axis...")
+            adjacentSize = self.inletRadius / (self.nozzleMeshDensityX)
+            uReservoirGradingX = self.findRoots(uReservoirMeshDensityX, self.reservoirHeight - self.inletRadius, adjacentSize)
+            
+        elif grading == 'False':
+            reservoirGradingZ = 1
+            uReservoirGradingX = 1
+            
+        elif grading == 'Uniform':
+            reservoirGradingZ = 1
+            uReservoirGradingX = 1
+            
+            # calculate the nozzle mesh cell z-dimension
+            adjacentSize = self.nozzleLength / (self.numWallPoints+1)
+            # calculate number of mesh cells in reservoir required to achieve similar size
+            reservoirMeshDensityZ = round(self.reservoirLength / adjacentSize)
+            reservoirMeshDensityZ = int(reservoirMeshDensityZ)
+            
+            # calculate the nozzle mesh cell x-dimension
+            adjacentSize = self.inletRadius / (self.nozzleMeshDensityX)
+            # calculate number of mesh cells in cavity required to achieve similar size
+            uReservoirMeshDensityX = round((self.reservoirHeight - self.inletRadius) / adjacentSize)
+            uReservoirMeshDensityX = int(uReservoirMeshDensityX)
+            
+        else:
+            reservoirGradingZ = 1
+            uReservoirGradingX = 1
+        
+        
+        # Set transfinite curves in reservoir for generating structured mesh
+        # upper reservoir x-axis
+        gmsh.model.geo.mesh.setTransfiniteCurve(rl1, uReservoirMeshDensityX + 1, meshType='Progression', coef=uReservoirGradingX)
+        gmsh.model.geo.mesh.setTransfiniteCurve(rl3, uReservoirMeshDensityX + 1, meshType='Progression', coef=-1*uReservoirGradingX)
+        
+        # reservoir z-axis
+        gmsh.model.geo.mesh.setTransfiniteCurve(rl2, reservoirMeshDensityZ + 1, meshType='Progression', coef=reservoirGradingZ)
+        gmsh.model.geo.mesh.setTransfiniteCurve(rl5, reservoirMeshDensityZ + 1, meshType='Progression', coef=-1*reservoirGradingZ)
+        
+        # lower reservoir x-axis
+        gmsh.model.geo.mesh.setTransfiniteCurve(rl4, self.nozzleMeshDensityX + 1, meshType='Progression', coef=1)
+        
+        # Set transfinite surface
+        gmsh.model.geo.mesh.setTransfiniteSurface(4, cornerTags=[rp1, rp2, rp4, self.p1])
+        
+        gmsh.model.geo.synchronize()
+        
       
         
     def generateWedge(self, wedgeAngle, extrudeLayers=1, recombineMesh=True):
@@ -431,6 +582,7 @@ class deLavalNozzleGenerator:
     
         
         # rotationally extrude the cross-section to produce the 3D geometry
+        # for full 3D cylindrical nozzle
         if (wedgeAngle == 2 * np.pi):
             # needs more work. mesh doesn't fully connect, physical groups not declared
             volume1 = gmsh.model.geo.revolve([(2, 1)], 0, 0, 0, 0, 0, 1, np.pi, numElements = [extrudeLayers], recombine=recombineMesh)
@@ -440,56 +592,29 @@ class deLavalNozzleGenerator:
             volume4 = gmsh.model.geo.revolve([(2, 1)], 0, 0, 0, 0, 0, -1, np.pi, numElements = [extrudeLayers], recombine=recombineMesh)
             volume5 = gmsh.model.geo.revolve([(2, 2)], 0, 0, 0, 0, 0, -1, np.pi, numElements = [extrudeLayers], recombine=recombineMesh)
             volume6 = gmsh.model.geo.revolve([(2, 3)], 0, 0, 0, 0, 0, -1, np.pi, numElements = [extrudeLayers], recombine=recombineMesh)
+        
+        # For axisymmetric wedge section
         else: 
-            volume1 = gmsh.model.geo.revolve([(2, 1)], 0, 0, 0, 0, 0, 1, wedgeAngle, numElements = [extrudeLayers], recombine=recombineMesh)
-            volume2 = gmsh.model.geo.revolve([(2, 2)], 0, 0, 0, 0, 0, 1, wedgeAngle, numElements = [extrudeLayers], recombine=recombineMesh)
-            volume3 = gmsh.model.geo.revolve([(2, 3)], 0, 0, 0, 0, 0, 1, wedgeAngle, numElements = [extrudeLayers], recombine=recombineMesh)
-                        
+            self.volume1 = gmsh.model.geo.revolve([(2, 1)], 0, 0, 0, 0, 0, 1, wedgeAngle, numElements = [extrudeLayers], recombine=recombineMesh)
+            self.volume2 = gmsh.model.geo.revolve([(2, 2)], 0, 0, 0, 0, 0, 1, wedgeAngle, numElements = [extrudeLayers], recombine=recombineMesh)
+            self.volume3 = gmsh.model.geo.revolve([(2, 3)], 0, 0, 0, 0, 0, 1, wedgeAngle, numElements = [extrudeLayers], recombine=recombineMesh)
             
-        gmsh.model.geo.synchronize()
-          
-        
-        ### move declaration of physical groups to new function?
-        # Set physical groups
-        # Group for nozzle wall patches
-        temp = self.findSides(tagList=volume1, start=2, stop=-3)                # isolate tags for desired sides from extrusion
-        temp.extend(self.findSides(tagList=volume3, start=-3, stop=-2))                            # ^
-        gmsh.model.addPhysicalGroup(dim=2, tags=temp, tag=1)
-        gmsh.model.setPhysicalName( dim=2, tag=1, name="Outerwall")
-        
-        # Group for left wedge side patches
-        gmsh.model.addPhysicalGroup(dim=2, tags=[1,2,3], tag=2)
-        gmsh.model.setPhysicalName( dim=2, tag=2, name="Left")
-        
-        # Group for wedge right side patches
-        gmsh.model.addPhysicalGroup(dim=2, tags=[volume1[0][1], volume2[0][1], volume3[0][1]], tag=3)
-        gmsh.model.setPhysicalName( dim=2, tag=3, name="Right")
-        
-        # Group for wedge axis patch
-        gmsh.model.addPhysicalGroup(dim=1, tags=[self.l1, self.l5], tag=4)
-        gmsh.model.setPhysicalName( dim=1, tag=4, name="Axis")
-        
-        # Group for wedge inlet patches
-        gmsh.model.addPhysicalGroup(dim=2, tags=[volume1[-2][1]], tag=5)
-        gmsh.model.setPhysicalName( dim=2, tag=5, name="Input")
-        
-        # Group for wedge outlet patches
-        gmsh.model.addPhysicalGroup(dim=2, tags=[volume2[2][1], volume3[2][1]], tag=6)
-        gmsh.model.setPhysicalName( dim=2, tag=6, name="Output")
-        
-        # Group for internal mesh
-        gmsh.model.addPhysicalGroup(dim=3, tags=[volume1[1][1], volume2[1][1], volume3[1][1]], tag=7)
-        gmsh.model.setPhysicalName( dim=3, tag=7, name="internal")
-             
-        
-        gmsh.model.geo.synchronize()
-        
-        # rotate wedge back so it is symmetric across the x-axis
-        entityTags= gmsh.model.getEntities(dim=-1)
-        gmsh.model.geo.rotate(entityTags, 0, 0, 0, 0, 0, -1, wedgeAngle/2)
-                   
-        gmsh.model.geo.synchronize()
-        
+            # extrude reservoir is present
+            if(self.RESERVOIR == 1):              
+                self.volume4 = gmsh.model.geo.revolve([(2, 4)], 0, 0, 0, 0, 0, 1, wedgeAngle, numElements = [extrudeLayers], recombine=recombineMesh)
+            
+            gmsh.model.geo.synchronize()
+            
+            self.declarePhysicalGroups(nozzleType='Wedge')
+            
+            gmsh.model.geo.synchronize()
+            
+            # rotate wedge back so it's symmetric across the xz-plane
+            entityTags = gmsh.model.getEntities(dim=-1)
+            gmsh.model.geo.rotate(entityTags, 0, 0, 0, 0, 0, -1, wedgeAngle/2)
+            
+            gmsh.model.geo.synchronize()
+                        
         
         # generate the 3D mesh
         gmsh.model.mesh.generate(2)
@@ -562,56 +687,221 @@ class deLavalNozzleGenerator:
         gmsh.model.geo.synchronize()
         
         # Extrude nozzle cross section
-        volume1 = gmsh.model.geo.extrude((2, 1),        0, extrudeHeight, 0, numElements=[extrudeLayers], heights=[], recombine=recombineMesh) 
-        volume2 = gmsh.model.geo.extrude((2, 2),        0, extrudeHeight, 0, numElements=[extrudeLayers], heights=[], recombine=recombineMesh) 
-        volume3 = gmsh.model.geo.extrude((2, 3),        0, extrudeHeight, 0, numElements=[extrudeLayers], heights=[], recombine=recombineMesh) 
-        volume4 = gmsh.model.geo.extrude(s1_reflect,    0, extrudeHeight, 0, numElements=[extrudeLayers], heights=[], recombine=recombineMesh)
-        volume5 = gmsh.model.geo.extrude(s2_reflect,    0, extrudeHeight, 0, numElements=[extrudeLayers], heights=[], recombine=recombineMesh)
-        volume6 = gmsh.model.geo.extrude(s3_reflect,    0, extrudeHeight, 0, numElements=[extrudeLayers], heights=[], recombine=recombineMesh)
+        self.volume1 = gmsh.model.geo.extrude((2, 1),        0, extrudeHeight, 0, numElements=[extrudeLayers], heights=[], recombine=recombineMesh) 
+        self.volume2 = gmsh.model.geo.extrude((2, 2),        0, extrudeHeight, 0, numElements=[extrudeLayers], heights=[], recombine=recombineMesh) 
+        self.volume3 = gmsh.model.geo.extrude((2, 3),        0, extrudeHeight, 0, numElements=[extrudeLayers], heights=[], recombine=recombineMesh) 
+        self.volume4 = gmsh.model.geo.extrude(s1_reflect,    0, extrudeHeight, 0, numElements=[extrudeLayers], heights=[], recombine=recombineMesh)
+        self.volume5 = gmsh.model.geo.extrude(s2_reflect,    0, extrudeHeight, 0, numElements=[extrudeLayers], heights=[], recombine=recombineMesh)
+        self.volume6 = gmsh.model.geo.extrude(s3_reflect,    0, extrudeHeight, 0, numElements=[extrudeLayers], heights=[], recombine=recombineMesh)
+        
+        self.s1_reflect = s1_reflect
+        self.s2_reflect = s2_reflect
+        self.s3_reflect = s3_reflect     
         
         
-        # Set physical groups
-        # Group for nozzle wall patches
-        temp = self.findSides(tagList=volume1, start=2, stop=-5)
-        temp.extend(self.findSides(tagList=volume4, start=2, stop=-4))      
-        temp.extend([volume3[4][1], volume6[4][1]])
-        gmsh.model.addPhysicalGroup(dim=2, tags=temp, tag=1)
-        gmsh.model.setPhysicalName(dim=2, tag=1, name="Outerwall")
-           
-        # Group for the side patches
-        temp = [1,                  2,                  3, 
-                s1_reflect[0][1],   s2_reflect[0][1],   s3_reflect[0][1],
-                volume1[0][1],      volume2[0][1],      volume3[0][1],
-                volume4[0][1],      volume5[0][1],      volume6[0][1]]
-        gmsh.model.addPhysicalGroup(dim=2, tags=temp, tag=2)
-        gmsh.model.setPhysicalName(dim=2, tag=2, name="Sides")
+        if(self.RESERVOIR == 1):  
+            # copy and reflect reservoir across yz-plane
+            s4_reflect = gmsh.model.geo.copy((2, self.rs1))
+            gmsh.model.geo.symmetrize(s4_reflect, 1, 0, 0, 0)
+            
+            gmsh.model.geo.synchronize()
+            
+            # To create structured mesh in reflected surface
+            # find tags of corner points
+            temp1 = gmsh.model.getBoundary(s4_reflect)
+            temp2 = gmsh.model.getBoundary(dimTags=[temp1[0], temp1[3]])
+            temp3 = self.findSides(temp2, start=0, stop=-1)           
+            gmsh.model.geo.mesh.setTransfiniteSurface(s4_reflect[0][1], cornerTags=temp3)
+             
+            # extrude reservoir sections
+            self.volume7 = gmsh.model.geo.extrude((2, self.rs1),    0, extrudeHeight, 0, numElements=[extrudeLayers], heights=[], recombine=recombineMesh)
+            self.volume8 = gmsh.model.geo.extrude(s4_reflect,       0, extrudeHeight, 0, numElements=[extrudeLayers], heights=[], recombine=recombineMesh)
+            self.s4_reflect = s4_reflect    
+          
         
-        # Group for the nozzle inlet patches
-        temp = [volume1[-4][1], volume4[-3][1]]
-        gmsh.model.addPhysicalGroup(dim=2, tags=temp, tag=3)
-        gmsh.model.setPhysicalName(dim=2, tag=3, name='Input')
-        
-        # Group for the nozzle outlet patches
-        temp = [volume2[3][1], volume3[2][1], volume3[3][1], 
-                volume5[3][1], volume6[2][1], volume6[3][1]]
-        gmsh.model.addPhysicalGroup(dim=2, tags=temp, tag=4)
-        gmsh.model.setPhysicalName(dim=2, tag=4, name="Output")
-        
-        # Group for the internal mesh
-        temp = [volume1[1][1], volume2[1][1], volume3[1][1],
-                volume4[1][1], volume5[1][1], volume6[1][1]]
-        gmsh.model.addPhysicalGroup(dim=3, tags=temp, tag=5)
-        gmsh.model.setPhysicalName(dim=3, tag=5, name="internal")
-        
+        # Group and name boundary patches
+        self.declarePhysicalGroups(nozzleType='Channel')        
         
         gmsh.model.geo.synchronize()
-        
-        
+             
         # generate the 3D mesh
         gmsh.model.mesh.generate(2)
         gmsh.model.mesh.recombine()        
         gmsh.model.mesh.generate(3)
        
+       
+       
+    def declarePhysicalGroups(self, nozzleType):
+        """
+        Function for grouping and naming boundary patches.  Used for setting
+        boundary conditions in openfoam.
+
+        Parameters
+        ----------
+        nozzleType : TYPE str
+            Shape of the nozzle being generated.
+            The available options are:
+                - 'Wedge': For axisymmetric wedge-shapped nozzles.
+                - 'Cylinder': Not currently in use.
+                - 'Channel': For channel nozzle shapes
+
+        Returns
+        -------
+        None.
+
+        """
+        
+        ### potentially add 'arrangment' variable to set where wall extends to
+        
+        # Set names of boundary patches
+        internalMeshName    = "internal"
+        inletPatchName      = "Input"
+        outletPatchName     = "Output"
+        wallPatchName       = "Outerwall"
+        rightPatchName      = "Right"
+        leftPatchName       = "Left"
+        
+        
+        if(nozzleType == 'Wedge'):
+            
+            # import tags from extruded surfaces
+            volume1 = self.volume1
+            volume2 = self.volume2
+            volume3 = self.volume3
+            
+            
+            # Group boundary patch tags
+            wallTags = self.findSides(tagList=volume1, start=2, stop=-3)
+            wallTags.extend([volume3[-3][1], volume3[-2][1]])
+            
+            leftTags        = [1, 2, 3]
+            rightTags       = [volume1[0][1], volume2[0][1], volume3[0][1]]
+            outletTags      = [volume2[2][1], volume3[2][1]]
+            internalTags    = [volume1[1][1], volume2[1][1], volume3[1][1]]
+            
+            # Add reservoir boundary patches to appropriate groups
+            if(self.RESERVOIR == 1):
+                volume4 = self.volume4
+                
+                wallTags.extend([volume4[3][1], volume4[4][1]])
+                leftTags.extend([4])
+                rightTags.extend([volume4[0][1]])
+                internalTags.extend([volume4[1][1]])
+                inletTags = [volume4[-2][1], volume4[-1][1]]
+            
+            # if there is no reservoir present                
+            else:
+                inletTags = [volume1[-2][1]]
+            
+            
+            # Group for nozzle wall patches
+            gmsh.model.addPhysicalGroup(dim=2, tags=wallTags,       tag=1)
+            gmsh.model.setPhysicalName( dim=2, tag=1, name=wallPatchName)
+            
+            # Group for left wedge side patches
+            gmsh.model.addPhysicalGroup(dim=2, tags=leftTags,       tag=2)
+            gmsh.model.setPhysicalName( dim=2, tag=2, name=leftPatchName)
+            
+            # Group for right wedge side patches
+            gmsh.model.addPhysicalGroup(dim=2, tags=rightTags,      tag=3)
+            gmsh.model.setPhysicalName( dim=2, tag=3, name=rightPatchName)
+            
+            # Group for inlet patches
+            gmsh.model.addPhysicalGroup(dim=2, tags=inletTags,      tag=5)
+            gmsh.model.setPhysicalName( dim=2, tag=5, name=inletPatchName)
+            
+            # Group for outlet patches
+            gmsh.model.addPhysicalGroup(dim=2, tags=outletTags,     tag=6)
+            gmsh.model.setPhysicalName( dim=2, tag=6, name=outletPatchName)
+            
+            # Group for internal mesh
+            gmsh.model.addPhysicalGroup(dim=3, tags=internalTags,   tag=7)
+            gmsh.model.setPhysicalName( dim=3, tag=7, name=internalMeshName)
+            
+            
+        elif(nozzleType == 'Cylinder'):
+            ### Not currently in use
+            temp = 0
+            
+        elif(nozzleType == 'Channel'):
+            
+            # import tags from extruded surfaces
+            volume1 = self.volume1
+            volume2 = self.volume2
+            volume3 = self.volume3
+            volume4 = self.volume4
+            volume5 = self.volume5
+            volume6 = self.volume6
+            
+            s1_reflect = self.s1_reflect
+            s2_reflect = self.s2_reflect
+            s3_reflect = self.s3_reflect
+            
+            # Isolate tags for surfaces on the nozzle wall
+            wallTags = self.findSides(tagList=volume1, start=2, stop=-5)
+            wallTags.extend(self.findSides(tagList=volume4, start=2, stop=-4))
+            wallTags.extend([volume3[4][1], volume6[4][1]])
+            
+            # Group tags for the remaining boundary patches
+            leftTags        = [1,                   2,                  3, 
+                               s1_reflect[0][1],    s2_reflect[0][1],   s3_reflect[0][1]]
+            rightTags       = [volume1[0][1],       volume2[0][1],      volume3[0][1],
+                               volume4[0][1],       volume5[0][1],      volume6[0][1]]
+            outletTags      = [volume2[3][1],       volume3[2][1],      volume3[3][1],
+                               volume5[3][1],       volume6[2][1],      volume6[3][1]]
+            internalTags    = [volume1[1][1],       volume2[1][1],      volume3[1][1],
+                               volume4[1][1],       volume5[1][1],      volume6[1][1]]
+            
+            # If the reservoir is present at the nozzle inlet
+            if(self.RESERVOIR == 1):
+                # import tags for extruded surfaces
+                volume7     = self.volume7
+                volume8     = self.volume8           
+                s4_reflect  = self.s4_reflect
+                
+                
+                wallTags.extend([       volume7[3][1], volume7[4][1],
+                                        volume8[3][1], volume8[4][1]])
+                leftTags.extend([       4,
+                                        s4_reflect[0][1]])
+                rightTags.extend([      volume7[0][1],
+                                        volume8[0][1]])
+                internalTags.extend([   volume7[1][1],
+                                        volume8[1][1]])
+                inletTags = [           volume7[5][1], volume7[6][1],
+                                        volume8[5][1], volume8[6][1]]
+             
+            # if the reservoir is not present at the nozzle inlet
+            else:
+                inletTags = [volume1[-4][1],    volume4[-3][1]]
+                
+                
+            # Group for nozzle wall patches
+            gmsh.model.addPhysicalGroup(dim=2, tags=wallTags,       tag=1)
+            gmsh.model.setPhysicalName( dim=2, tag=1, name=wallPatchName)
+            
+            # Group for left wedge side patches
+            gmsh.model.addPhysicalGroup(dim=2, tags=leftTags,       tag=2)
+            gmsh.model.setPhysicalName( dim=2, tag=2, name=leftPatchName)
+            
+            # Group for right wedge side patches
+            gmsh.model.addPhysicalGroup(dim=2, tags=rightTags,      tag=3)
+            gmsh.model.setPhysicalName( dim=2, tag=3, name=rightPatchName)
+            
+            # Group for inlet patches
+            gmsh.model.addPhysicalGroup(dim=2, tags=inletTags,      tag=5)
+            gmsh.model.setPhysicalName( dim=2, tag=5, name=inletPatchName)
+            
+            # Group for outlet patches
+            gmsh.model.addPhysicalGroup(dim=2, tags=outletTags,     tag=6)
+            gmsh.model.setPhysicalName( dim=2, tag=6, name=outletPatchName)
+            
+            # Group for internal mesh
+            gmsh.model.addPhysicalGroup(dim=3, tags=internalTags,   tag=7)
+            gmsh.model.setPhysicalName( dim=3, tag=7, name=internalMeshName)
+            
+               
+        return()
        
     
         
@@ -676,38 +966,49 @@ class deLavalNozzleGenerator:
         # If the function for generating the 2D cross-section geometry has been run
         if self.GEOMETRY == 1:
             docFile.write("GEOMETRY\n")
-            docFile.write("nozzleLength:    %.2f\n"   %(self.nozzleLength))
-            docFile.write("inletRadius:     %.2f\n"   %(self.inletRadius))
-            docFile.write("outletRadius:    %.2f\n"   %(self.outletRadius))
-            docFile.write("cavityLength:    %.2f\n"   %(self.cavityLength))
-            docFile.write("cavityHeight:    %.2f\n"   %(self.cavityHeight))
-            docFile.write("numWallPoints:   %.2f\n"   %(self.numWallPoints))
-            docFile.write("lc:              %.2f\n"   %(self.lc))
+            docFile.write("nozzleLength:            %.2f\n"   %(self.nozzleLength))
+            docFile.write("inletRadius:             %.2f\n"   %(self.inletRadius))
+            docFile.write("outletRadius:            %.2f\n"   %(self.outletRadius))
+            docFile.write("cavityLength:            %.2f\n"   %(self.cavityLength))
+            docFile.write("cavityHeight:            %.2f\n"   %(self.cavityHeight))
+            docFile.write("numWallPoints:           %.2f\n"   %(self.numWallPoints))
+            docFile.write("lc:                      %.2f\n"   %(self.lc))
             docFile.write("\n")
         
         # if the function for generating the 2D cross-section mesh has been run
         if self.MESH2D == 1:
             docFile.write("MESH\n")
-            docFile.write("nozzleMeshDensityX:  %d\n"    %(self.nozzleMeshDensityX))
-            docFile.write("cavityMeshDensityZ:  %d\n"    %(self.cavityMeshDensityZ))
-            docFile.write("uCavityMeshDensityX: %d\n"    %(self.uCavityMeshDensityX))
-            docFile.write("meshType:            %s\n"    %(self.meshType))
-            docFile.write("grading:             %s\n"    %(self.grading))
+            docFile.write("nozzleMeshDensityX:      %d\n"    %(self.nozzleMeshDensityX))
+            docFile.write("cavityMeshDensityZ:      %d\n"    %(self.cavityMeshDensityZ))
+            docFile.write("uCavityMeshDensityX:     %d\n"    %(self.uCavityMeshDensityX))
+            docFile.write("meshType:                %s\n"    %(self.meshType))
+            docFile.write("grading:                 %s\n"    %(self.grading))
+            docFile.write("\n")
+         
+        # if the function for generating a reservoir at the nozzle inlet has been run
+        if self.RESERVOIR == 1:
+            docFile.write("RESERVOIR\n")
+            docFile.write("reservoirLength:         %.2f\n"     %(self.reservoirLength))
+            docFile.write("reservoirHeight:         %.2f\n"     %(self.reservoirHeight))
+            docFile.write("reservoirMeshDensityZ:   %d\n"       %(self.reservoirMeshDensityZ))
+            docFile.write("reservoirMeshDensityX:   %d\n"       %(self.reservoirMeshDensityX))
+            docFile.write("grading:                 %s\n"       %(self.reservoirGradingOpt))
             docFile.write("\n")
         
         # if the function for generating a 3D wedge geometry has been run
         if self.WEDGE == 1:
             docFile.write("WEDGE\n")
-            docFile.write("wedgeAngle:      %.2f\n"   %(self.wedgeAngle))
-            docFile.write("extrudeLayers:   %d\n"     %(self.extrudeLayers))
-            docFile.write("recombineMesh:   %s\n"     %(self.recombineMesh))
+            docFile.write("wedgeAngle:              %.2f\n"   %(self.wedgeAngle))
+            docFile.write("extrudeLayers:           %d\n"     %(self.extrudeLayers))
+            docFile.write("recombineMesh:           %s\n"     %(self.recombineMesh))
             docFile.write("\n")
-            
+         
+        # if the function for generating a 2D channel nozzle has been run
         if self.CHANNEL == 1:
             docFile.write("CHANNEL\n")
-            docFile.write("extrudeHeight:   %.2f\n"   %(self.extrudeHeight))
-            docFile.write("extrudeLayers:   %d\n"     %(self.extrudeLayers))
-            docFile.write("recombineMesh:   %s\n"     %(self.recombineMesh))
+            docFile.write("extrudeHeight:           %.2f\n"   %(self.extrudeHeight))
+            docFile.write("extrudeLayers:           %d\n"     %(self.extrudeLayers))
+            docFile.write("recombineMesh:           %s\n"     %(self.recombineMesh))
             docFile.write("\n")
             
         docFile.close()
@@ -751,6 +1052,8 @@ class deLavalNozzleGenerator:
         functResidual = 1e-5        # maximum value of the function when calculated at the current root value
         initialGuess = 1.1          # initial guess for the value of the root
         guessIncrement = 1          # amount to increment initial guess to find next root
+        maxIterations = 1000        # maximum number of iterations to find the appropriate root
+        numIterations = 0
         
         # if the initial, uniform mesh density in the region is too high for grading
         uniformSize = length / numCells
@@ -759,8 +1062,7 @@ class deLavalNozzleGenerator:
             return(1)
         
         r = initialGuess
-        funct = 1000
-               
+        funct = 1000          
         
         # Specify how close the solution can approach 1
         # used to distinguish between finding 1 as the root vs a root very close to 1
@@ -776,10 +1078,16 @@ class deLavalNozzleGenerator:
                 
             # check if the root found is 1
             if (r < 1 + tolerance):
-                # increment the initial guess to find the region of convergence of the next root
-                funct = 1000
-                initialGuess += guessIncrement
-                r = initialGuess * 1
+                if (numIterations >= maxIterations):
+                    # If maximum number of iterations has been exceeded
+                    print("Maximum number of iterations exceeded")
+                    return(1)
+                else:
+                    # increment the initial guess to find the region of convergence of the next root
+                    funct = 1000
+                    initialGuess += guessIncrement
+                    r = initialGuess * 1
+                    numIterations += 1
             else:
                 print("Root found: %f" %(r))
                 return(r)
@@ -823,17 +1131,29 @@ class deLavalNozzleGenerator:
             
         return (sides)
   
-        
+
+"""      
 test = deLavalNozzleGenerator()
-test.generateCrossSection(nozzleLength=12.5e-3, cavityLength=50e-3, cavityHeight=25e-3, numWallPoints=80)
-test.generate2DMesh(nozzleMeshDensityX=40, cavityMeshDensityZ=60, uCavityMeshDensityX=60, grading='Uniform')
+test.generateCrossSection(nozzleLength=12.5e-3, cavityLength=25e-3, cavityHeight=25e-3, numWallPoints=40)
+test.generate2DMesh(nozzleMeshDensityX=20, cavityMeshDensityZ=50, uCavityMeshDensityX=50, grading='Uniform')
 #test.generateWedge(2 * np.pi, 20)
 #test.generateWedge(0.05, 1)
-test.generateChannel(extrudeHeight=0.5e-3, extrudeLayers=1)
-test.saveMesh()
+#test.generateChannel(extrudeHeight=0.5e-3, extrudeLayers=1)
+test.generateWedge(wedgeAngle=0.01, extrudeLayers=1, recombineMesh=True)
+test.saveMesh(directory="D:\\temp\\")
 gmsh.fltk.run()     # opens Gmsh to view generated mesh
 gmsh.finalize()
+"""
 
+test = deLavalNozzleGenerator()
+test.generateCrossSection(nozzleLength=12.5e-3, cavityLength=50e-3, cavityHeight=25e-3, numWallPoints=40)
+test.generate2DMesh(nozzleMeshDensityX=20, cavityMeshDensityZ=100, uCavityMeshDensityX=50, grading='True')
+test.generateReservoir(reservoirLength=20e-3, reservoirHeight=20e-3, uReservoirMeshDensityX=30, reservoirMeshDensityZ=20, grading='True')
+test.generateWedge(wedgeAngle=0.01, extrudeLayers=1, recombineMesh=True)
+#test.generateChannel(extrudeHeight=1e-3, extrudeLayers=1, recombineMesh=True)
+test.saveMesh()
+gmsh.fltk.run()
+gmsh.finalize()
 
 
 
