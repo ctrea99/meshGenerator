@@ -12,6 +12,8 @@ import numpy as np
 import gmsh
 import time
 import os
+import csv
+from scipy import interpolate
 
 gmsh.initialize()
 
@@ -25,18 +27,23 @@ class deLavalNozzleGenerator:
     Functions Overview:
         - generateCrossSection: Generates the 2D cross-section geometry of the 
             domain.
-        - nozzleWallFunction: Specifies the desired nozzle shape.
+        - nozzleWallFunction: Specifies the function describing desired nozzle shape.
+        - importNozzleFile: Specifies parameters for importing the nozzle profile
+            via wall coordinates provided in an external .csv file
         - generate2DMesh: Generates a 2D structured mesh within the 2D cross-section
+        - generateReservoir: Generates a rectangular reservoir at the nozzle inlet
         - generateWedge: Generates a 3D axi-symmetric wedge section
         - generateChannel: Generates a 3D channel nozzle
+        - declarePhysicalGroups: Groups and names the mesh boundaries
         - saveMesh(): Saves the generated mesh as well as documents the 
             input parameters used.
        
     Suggested order for running the class functions:
         1. generateCrossSection()
         2. generate2DMesh()
-        3. generateWedge() OR generateChannel()
-        4. saveMesh()
+        3. (Optional) generateReservoir()
+        4. generateWedge() OR generateChannel()
+        5. saveMesh()
         
     Installation Instructions:
         - Gmsh: https://gmsh.info/
@@ -62,6 +69,10 @@ class deLavalNozzleGenerator:
         self.CHANNEL    = 0
         self.RESERVOIR  = 0
         
+        # Set class variables
+        self.wallPlotMethod = 'file'        # Specify nozzle shape via .csv file
+        #self.wallPlotMethod = 'function'   # Specify nozzle shape via piecewise function
+        
         
     def generateCrossSection(self,nozzleLength, cavityLength, cavityHeight, numWallPoints=1, lc=1):
         """
@@ -71,7 +82,8 @@ class deLavalNozzleGenerator:
         output flow properties. The geometry consists of three sections, the nozzle
         and the upper and lower sections of the attached cavity.  The nozzle is 
         oriented such that the nozzle axis is parallel with the z-axis. The nozzle
-        wall shape is defined within self.nozzleWallFunction.
+        wall shape can be defined within self.nozzleWallFunction or within an
+        external .csv file imported in self.importNozzleFile.
 
         Parameters
         ----------
@@ -197,13 +209,15 @@ class deLavalNozzleGenerator:
 
         """
                
-        
+        # Robinson Paper nozzle shape
+        # Robinson C., "Flow Through a de Laval Nozzle", https://pdfslide.net/documents/flow-through-a-de-laval-nozzle-boston-2-1-overview-of-the-case-in-this-project.html
         # temp = z / 1e-3      
         # #radius = 1 - (0.868 * (-z + 2)**2) + (0.432 * (-z + 2)**3) 
         # radius = 1 - (0.868 * (-temp + 2)**2) + (0.432 * (-temp + 2)**3) 
         # radius *= 1e-3
                 
 
+        # CLPU experiment nozzle shape
         radius = np.zeros(len(z))
         
         for i in range(0, len(z)):
@@ -214,6 +228,61 @@ class deLavalNozzleGenerator:
 
         
         return(radius)    
+    
+    
+    
+    def importNozzleFile(self, z):
+        """
+        Function for importing the nozzle profile as a series of coordinates 
+        given in an external .csv file.
+        
+        No special attention is needed for the coordinates given (i.e. equal
+        spacing, number of points, etc.) as the function only uses the provided
+        points as a reference and then performs interpolation to calculate the
+        nozzle radius at the required points.  Scaling can be optionally
+        conducted on the nozzle dimensions using the multiplier_* variables.
+        NOTE: In the .csv file, the first column should contain the axial (z) 
+            coordinates while the second column should contain the radial (x)
+            coordinates.
+
+        Parameters
+        ----------
+        z : TYPE list
+            Coordinates along nozzle (z) axis
+
+        Returns
+        -------
+        radius : TYPE list
+            Nozzle radius at each corresponding point along the nozzle axis
+
+        """
+        
+        # Set function variables
+        #fileDelimiter       = ' '
+        fileDelimiter       = ','
+        interpolationMethod = 'cubic'
+        # Lorenz et al; Matter Radiat. Extremes 4, 015401 (2019); doi: 10.1063/1.5081509
+        filePath            = "ELI_nozzle_profile_scaled.csv"
+        multiplier_global   = 1e-6
+        multiplier_radial   = 1
+        multiplier_axial    = 1.08006
+        
+        # Import .csv with nozzle wall coordinates
+        with open(filePath) as nozzleFile:
+            givenWallPoints = np.asarray(list(csv.reader(nozzleFile, delimiter=fileDelimiter)))
+        givenWallPoints = givenWallPoints.astype(np.float)
+        
+        # Perform scaling of nozzle shape
+        givenWallPoints      *= multiplier_global                              # convert values to meters
+        givenWallPoints[:,0] *= multiplier_axial                               # scale nozzle length
+        givenWallPoints[:,1] *= multiplier_radial                              # scale nozzle radius
+        
+        # Interpolate the given wall coordinates to get desired mesh density
+        interpolatedFunction = interpolate.interp1d(givenWallPoints[:,0], givenWallPoints[:,1], kind=interpolationMethod)
+        radius = interpolatedFunction(z)
+        
+        return(radius)
+    
     
     
         
@@ -243,7 +312,18 @@ class deLavalNozzleGenerator:
         lList = np.zeros(numWallPoints-1,dtype=np.int)                          # List to hold the tags of the lines located on the nozzle wall
         
         z = np.linspace(0,nozzleLength,numWallPoints)
-        radius = self.nozzleWallFunction(z)                                     # calculate the nozzle radius at each point along axis
+        
+        # calculate the nozzle radius at each point along axis
+        if(self.wallPlotMethod == 'function'):          # Specify nozzle shape via piecewise function
+            radius = self.nozzleWallFunction(z)                                 
+        elif(self.wallPlotMethod == 'file'):            # Specify nozzle shape via external .csv file
+            radius = self.importNozzleFile(z)
+        else:
+            temp = 0  
+
+        # Uncomment these lines to add a sawtooth shape to the nozzle wall
+        #radius[0::4] -= 50e-6   
+        #radius[2::4] += 50e-6                             
         
         # set constants for the inlet and outlet radii
         self.inletRadius  = radius[0]
@@ -255,7 +335,7 @@ class deLavalNozzleGenerator:
                 pList[i] = gmsh.model.geo.addPoint(radius[i], 0, z[i], lc)
             else:
                 pList[i] = gmsh.model.geo.addPoint(radius[i], 0, z[i], lc)
-                lList[i-1] = gmsh.model.geo.addLine(pList[i],pList[i-1])
+                lList[i-1] = gmsh.model.geo.addLine(pList[i], pList[i-1])
         
         # return list of point and line tags along nozzle wall
         return(pList, lList)
@@ -266,9 +346,9 @@ class deLavalNozzleGenerator:
         """
         Function to generate a 2D structured mesh within the nozzle cross-section.
         
-        NOTE: The number of mesh cells within the nozzle along the transverse direction
+        NOTE: The number of mesh cells within the nozzle along the radial direction
             is the same as the number of mesh cells within the lower external cavity
-            section along the transverse direction.
+            section along the radial direction.
 
         Parameters
         ----------
@@ -327,19 +407,19 @@ class deLavalNozzleGenerator:
         if grading == 'True':
             # calculate progression required for smooth cell size transition
             print("Grading cavity z-axis...")
-            adjacentSize = self.nozzleLength / (self.numWallPoints+1)
+            adjacentSize   = self.nozzleLength / (self.numWallPoints+1)
             cavityGradingZ = self.findRoots(cavityMeshDensityZ, self.cavityLength, adjacentSize)
             
             print("Grading upper cavity x-axis...")
-            adjacentSize = self.outletRadius / (self.nozzleMeshDensityX)
+            adjacentSize    = self.outletRadius / (self.nozzleMeshDensityX)
             uCavityGradingX = self.findRoots(uCavityMeshDensityX, self.cavityHeight - self.outletRadius, adjacentSize)
         
         elif grading == 'False':
-            cavityGradingZ = 1
+            cavityGradingZ  = 1
             uCavityGradingX = 1
         
         elif grading == 'Uniform':          
-            cavityGradingZ = 1
+            cavityGradingZ  = 1
             uCavityGradingX = 1
             
             # calculate the nozzle mesh cell z-dimension
@@ -451,16 +531,16 @@ class deLavalNozzleGenerator:
         # ------------------------------------------------ #
           
         # generate points for reservoir
-        rp1 = gmsh.model.geo.addPoint(reservoirHeight, 0, 0)
-        rp2 = gmsh.model.geo.addPoint(reservoirHeight, 0, -reservoirLength)
+        rp1 = gmsh.model.geo.addPoint(reservoirHeight,  0, 0)
+        rp2 = gmsh.model.geo.addPoint(reservoirHeight,  0, -reservoirLength)
         rp3 = gmsh.model.geo.addPoint(self.inletRadius, 0, -reservoirLength)
-        rp4 = gmsh.model.geo.addPoint(0, 0, -reservoirLength)
+        rp4 = gmsh.model.geo.addPoint(0,                0, -reservoirLength)
         
         rl1 = gmsh.model.geo.addLine(self.pList[0], rp1)
-        rl2 = gmsh.model.geo.addLine(rp1, rp2)
-        rl3 = gmsh.model.geo.addLine(rp2, rp3)
-        rl4 = gmsh.model.geo.addLine(rp3, rp4)
-        rl5 = gmsh.model.geo.addLine(rp4, self.p1)
+        rl2 = gmsh.model.geo.addLine(rp1,           rp2)
+        rl3 = gmsh.model.geo.addLine(rp2,           rp3)
+        rl4 = gmsh.model.geo.addLine(rp3,           rp4)
+        rl5 = gmsh.model.geo.addLine(rp4,           self.p1)
         
         # set reservoir surface
         temp = [-self.l4, rl1, rl2, rl3, rl4, rl5]
@@ -734,7 +814,7 @@ class deLavalNozzleGenerator:
     def declarePhysicalGroups(self, nozzleType):
         """
         Function for grouping and naming boundary patches.  Used for setting
-        boundary conditions in openfoam.
+        boundary conditions in OpenFOAM.
 
         Parameters
         ----------
@@ -772,11 +852,15 @@ class deLavalNozzleGenerator:
             
             # Group boundary patch tags
             wallTags = self.findSides(tagList=volume1, start=2, stop=-3)
-            wallTags.extend([volume3[-3][1], volume3[-2][1]])
+            #wallTags.extend([volume3[-3][1], volume3[-2][1]])                 # sets top of cavity as wall
+            wallTags.extend([volume3[-2][1]])                                  # sets top of cavity as outlet
+            
+            print(volume3)
             
             leftTags        = [1, 2, 3]
             rightTags       = [volume1[0][1], volume2[0][1], volume3[0][1]]
-            outletTags      = [volume2[2][1], volume3[2][1]]
+            #outletTags      = [volume2[2][1], volume3[2][1]]                  # sets top of cavity as wall
+            outletTags      = [volume2[2][1], volume3[2][1], volume3[-3][1]]   # sets top of cavity as outlet
             internalTags    = [volume1[1][1], volume2[1][1], volume3[1][1]]
             
             # Add reservoir boundary patches to appropriate groups
@@ -966,13 +1050,13 @@ class deLavalNozzleGenerator:
         # If the function for generating the 2D cross-section geometry has been run
         if self.GEOMETRY == 1:
             docFile.write("GEOMETRY\n")
-            docFile.write("nozzleLength:            %.2f\n"   %(self.nozzleLength))
-            docFile.write("inletRadius:             %.2f\n"   %(self.inletRadius))
-            docFile.write("outletRadius:            %.2f\n"   %(self.outletRadius))
-            docFile.write("cavityLength:            %.2f\n"   %(self.cavityLength))
-            docFile.write("cavityHeight:            %.2f\n"   %(self.cavityHeight))
-            docFile.write("numWallPoints:           %.2f\n"   %(self.numWallPoints))
-            docFile.write("lc:                      %.2f\n"   %(self.lc))
+            docFile.write("nozzleLength:            %f\n"   %(self.nozzleLength))
+            docFile.write("inletRadius:             %f\n"   %(self.inletRadius))
+            docFile.write("outletRadius:            %f\n"   %(self.outletRadius))
+            docFile.write("cavityLength:            %f\n"   %(self.cavityLength))
+            docFile.write("cavityHeight:            %f\n"   %(self.cavityHeight))
+            docFile.write("numWallPoints:           %f\n"   %(self.numWallPoints))
+            docFile.write("lc:                      %f\n"   %(self.lc))
             docFile.write("\n")
         
         # if the function for generating the 2D cross-section mesh has been run
@@ -988,8 +1072,8 @@ class deLavalNozzleGenerator:
         # if the function for generating a reservoir at the nozzle inlet has been run
         if self.RESERVOIR == 1:
             docFile.write("RESERVOIR\n")
-            docFile.write("reservoirLength:         %.2f\n"     %(self.reservoirLength))
-            docFile.write("reservoirHeight:         %.2f\n"     %(self.reservoirHeight))
+            docFile.write("reservoirLength:         %f\n"       %(self.reservoirLength))
+            docFile.write("reservoirHeight:         %f\n"       %(self.reservoirHeight))
             docFile.write("reservoirMeshDensityZ:   %d\n"       %(self.reservoirMeshDensityZ))
             docFile.write("reservoirMeshDensityX:   %d\n"       %(self.reservoirMeshDensityX))
             docFile.write("grading:                 %s\n"       %(self.reservoirGradingOpt))
@@ -998,7 +1082,7 @@ class deLavalNozzleGenerator:
         # if the function for generating a 3D wedge geometry has been run
         if self.WEDGE == 1:
             docFile.write("WEDGE\n")
-            docFile.write("wedgeAngle:              %.2f\n"   %(self.wedgeAngle))
+            docFile.write("wedgeAngle:              %f\n"     %(self.wedgeAngle))
             docFile.write("extrudeLayers:           %d\n"     %(self.extrudeLayers))
             docFile.write("recombineMesh:           %s\n"     %(self.recombineMesh))
             docFile.write("\n")
@@ -1006,7 +1090,7 @@ class deLavalNozzleGenerator:
         # if the function for generating a 2D channel nozzle has been run
         if self.CHANNEL == 1:
             docFile.write("CHANNEL\n")
-            docFile.write("extrudeHeight:           %.2f\n"   %(self.extrudeHeight))
+            docFile.write("extrudeHeight:           %f\n"     %(self.extrudeHeight))
             docFile.write("extrudeLayers:           %d\n"     %(self.extrudeLayers))
             docFile.write("recombineMesh:           %s\n"     %(self.recombineMesh))
             docFile.write("\n")
@@ -1049,11 +1133,11 @@ class deLavalNozzleGenerator:
         """
         
         # Rootfinding parameters 
-        functResidual = 1e-5        # maximum value of the function when calculated at the current root value
-        initialGuess = 1.1          # initial guess for the value of the root
-        guessIncrement = 1          # amount to increment initial guess to find next root
-        maxIterations = 1000        # maximum number of iterations to find the appropriate root
-        numIterations = 0
+        functResidual  = 1e-5         # maximum value of the function when calculated at the current root value
+        initialGuess   = 1.1          # initial guess for the value of the root
+        guessIncrement = 1            # amount to increment initial guess to find next root
+        maxIterations  = 1000         # maximum number of iterations to find the appropriate root
+        numIterations  = 0
         
         # if the initial, uniform mesh density in the region is too high for grading
         uniformSize = length / numCells
@@ -1061,7 +1145,7 @@ class deLavalNozzleGenerator:
             print("Grading could not be performed")
             return(1)
         
-        r = initialGuess
+        r     = initialGuess
         funct = 1000          
         
         # Specify how close the solution can approach 1
@@ -1132,27 +1216,25 @@ class deLavalNozzleGenerator:
         return (sides)
   
 
-"""      
-test = deLavalNozzleGenerator()
-test.generateCrossSection(nozzleLength=12.5e-3, cavityLength=25e-3, cavityHeight=25e-3, numWallPoints=40)
-test.generate2DMesh(nozzleMeshDensityX=20, cavityMeshDensityZ=50, uCavityMeshDensityX=50, grading='Uniform')
-#test.generateWedge(2 * np.pi, 20)
-#test.generateWedge(0.05, 1)
-#test.generateChannel(extrudeHeight=0.5e-3, extrudeLayers=1)
-test.generateWedge(wedgeAngle=0.01, extrudeLayers=1, recombineMesh=True)
-test.saveMesh(directory="D:\\temp\\")
-gmsh.fltk.run()     # opens Gmsh to view generated mesh
-gmsh.finalize()
-"""
 
 test = deLavalNozzleGenerator()
-test.generateCrossSection(nozzleLength=12.5e-3, cavityLength=50e-3, cavityHeight=25e-3, numWallPoints=40)
-test.generate2DMesh(nozzleMeshDensityX=20, cavityMeshDensityZ=100, uCavityMeshDensityX=50, grading='True')
-test.generateReservoir(reservoirLength=20e-3, reservoirHeight=20e-3, uReservoirMeshDensityX=30, reservoirMeshDensityZ=20, grading='True')
+test.generateCrossSection(nozzleLength=15.63e-3, cavityLength=75e-3, cavityHeight=45e-3, numWallPoints=200)
+test.generate2DMesh(nozzleMeshDensityX=40, cavityMeshDensityZ=200, uCavityMeshDensityX=100, grading='True')
+test.generateReservoir(reservoirLength=30e-3, reservoirHeight=30e-3, uReservoirMeshDensityX=60, reservoirMeshDensityZ=40, grading='True')
+#test.generateWedge(wedgeAngle=0.01, extrudeLayers=1, recombineMesh=True)
+test.generateChannel(extrudeHeight=1e-3, extrudeLayers=1, recombineMesh=True)
+
+"""
+test = deLavalNozzleGenerator()
+test.generateCrossSection(nozzleLength=12.5e-3, cavityLength=50e-3, cavityHeight=25e-3, numWallPoints=80)
+test.generate2DMesh(nozzleMeshDensityX=40, cavityMeshDensityZ=200, uCavityMeshDensityX=100, grading='True')
+test.generateReservoir(reservoirLength=20e-3, reservoirHeight=20e-3, uReservoirMeshDensityX=60, reservoirMeshDensityZ=40, grading='True')
 test.generateWedge(wedgeAngle=0.01, extrudeLayers=1, recombineMesh=True)
 #test.generateChannel(extrudeHeight=1e-3, extrudeLayers=1, recombineMesh=True)
-test.saveMesh()
-gmsh.fltk.run()
+"""
+
+#test.saveMesh()      # Save the mesh
+gmsh.fltk.run()      # Open Gmsh to view mesh
 gmsh.finalize()
 
 
